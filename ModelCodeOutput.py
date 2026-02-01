@@ -11,7 +11,11 @@ from sklearn.metrics import (
     precision_score,
     confusion_matrix
 )
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import average_precision_score
 import warnings
+import matplotlib.pyplot as plt
+import seaborn as sns
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # =================================================================
@@ -78,14 +82,44 @@ xgb_params = {
     'early_stopping_rounds':15
 }
 
-model = xgb.XGBClassifier(**xgb_params, use_label_encoder=False)
+# 1. Initialize Stratified 5-Fold
+# 2. Setup 5-Fold CV ONLY for the training data
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+cv_scores = []
 
-print("\nStarting XGBoost training with weighted optimization...")
-model.fit(
-    X_train, y_train,
-    eval_set=[(X_test, y_test)],
+print(f"--- Starting 5-Fold Stratified Cross-Validation ---")
+
+# 2. The Loop: it splits the data 5 different ways
+for train_idx, val_idx in skf.split(X_train, y_train):
+    # Create the folds
+    X_train_fold, X_val_fold = X_train.iloc[train_idx], X_train.iloc[val_idx]
+    y_train_fold, y_val_fold = y_train.iloc[train_idx], y_train.iloc[val_idx]
+
+    # Initialize model (using the parameters we discussed)
+
+    model = xgb.XGBClassifier(**xgb_params, use_label_encoder=False)
+
+    print("\nStarting XGBoost training with weighted optimization...")
+    model.fit(
+    X_train_fold, y_train_fold,
+    eval_set=[(X_val_fold, y_val_fold)],
     verbose=False
-)
+    )
+    
+    # Check score on the inner validation fold
+    preds = model.predict_proba(X_val_fold)[:, 1]
+    cv_scores.append(average_precision_score(y_val_fold, preds))
+    
+print(f"Average CV PR-AUC on Training Data: {np.mean(cv_scores):.4f}")
+
+# 3. Final Evaluation on the untouched X_test
+final_model = xgb.XGBClassifier(**xgb_params, use_label_encoder=False)
+final_model.fit(X_train, y_train,eval_set=[(X_test, y_test)], verbose=False) # Train on full training set
+test_preds = final_model.predict_proba(X_test)[:, 1]
+final_score = average_precision_score(y_test, test_preds)
+
+print(f"Final Score on Untouched Test Data: {final_score:.4f}")
+
 print("XGBoost training complete.")
 
 # =================================================================
@@ -93,7 +127,7 @@ print("XGBoost training complete.")
 # =================================================================
 
 # Predict probabilities on the test set
-y_pred_proba = model.predict_proba(X_test)[:, 1]
+y_pred_proba = final_model.predict_proba(X_test)[:, 1]
 
 # --- 5a. PR-AUC Score ---
 pr_auc = average_precision_score(y_test, y_pred_proba)
@@ -127,3 +161,14 @@ print("\n   Confusion Matrix:")
 print("       Predicted Legit | Predicted Fraud")
 print(f"Actual Legit | {cm[0, 0]:>13} | {cm[0, 1]:>13}")
 print(f"Actual Fraud | {cm[1, 0]:>13} | {cm[1, 1]:>13}")
+
+
+# --- 6. Visualization: Confusion Matrix Heatmap ---
+plt.figure(figsize=(8, 6))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+            xticklabels=['Legit', 'Fraud'], 
+            yticklabels=['Legit', 'Fraud'])
+plt.ylabel('Actual')
+plt.xlabel('Predicted')
+plt.title(f'Confusion Matrix\n(Optimal Threshold: {optimal_threshold:.4f})')
+plt.show()
